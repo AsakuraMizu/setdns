@@ -1,22 +1,17 @@
 mod config;
 mod error;
+mod platform;
 
 pub use config::Config;
 pub use error::{Error, Result};
 
 /// RAII handle that restores DNS configuration when closed or dropped.
-pub struct SetDns(Option<InnerSetDns>);
+pub struct SetDns(Option<platform::SetDns>);
 
 impl SetDns {
     /// Validate and apply a DNS configuration.
     pub fn apply(config: Config) -> Result<Self> {
-        let config = config.normalize()?;
-
-        if config.domains.is_empty() {
-            Err(Error::UnsupportedGlobalDns)
-        } else {
-            Err(Error::UnsupportedSplitDns)
-        }
+        platform::SetDns::apply(config.normalize()?).map(|inner| Self(Some(inner)))
     }
 
     /// Restore the previous DNS configuration and consume this handle.
@@ -36,13 +31,5 @@ impl Drop for SetDns {
         {
             log::warn!("failed to restore DNS configuration for setdns: {err}");
         }
-    }
-}
-
-struct InnerSetDns;
-
-impl InnerSetDns {
-    fn close(self) -> Result<()> {
-        Ok(())
     }
 }
