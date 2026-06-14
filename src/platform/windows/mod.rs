@@ -101,7 +101,7 @@ try { Clear-DnsClientCache -ErrorAction Stop } catch { }
 
 fn write_header(script: &mut String, owner: &str) {
     script.push_str("$ErrorActionPreference = 'Stop'\n");
-    write!(script, "$Owner = {}\n", powershell_string(owner)).expect("write to String cannot fail");
+    writeln!(script, "$Owner = {}", powershell_string(owner)).expect("write to String cannot fail");
 }
 
 fn write_namespace_chunks(script: &mut String, namespaces: &[String]) {
