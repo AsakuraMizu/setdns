@@ -1,0 +1,10 @@
+[package]
+name = "setdns"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Temporarily apply and restore system DNS configuration, including global and split DNS."
+
+[dependencies]
+log = "0.4"
+thiserror = "2"
