@@ -1,17 +1,27 @@
-use crate::{Error, Result, config::NormalizedConfig};
+mod global;
+mod resolver;
+pub(crate) mod state;
 
-pub(crate) struct SetDns;
+use crate::{Result, config::NormalizedConfig};
+
+pub(crate) enum SetDns {
+    Global(global::SetDns),
+    Resolver(resolver::SetDns),
+}
 
 impl SetDns {
     pub(crate) fn apply(config: NormalizedConfig) -> Result<Self> {
         if config.domains.is_empty() {
-            Err(Error::UnsupportedGlobalDns)
+            global::SetDns::apply(config).map(Self::Global)
         } else {
-            Err(Error::UnsupportedSplitDns)
+            resolver::SetDns::apply(config).map(Self::Resolver)
         }
     }
 
     pub(crate) fn close(self) -> Result<()> {
-        Ok(())
+        match self {
+            Self::Global(inner) => inner.close(),
+            Self::Resolver(inner) => inner.close(),
+        }
     }
 }
