@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 mod config;
 mod error;
 mod platform;
@@ -5,7 +7,8 @@ mod platform;
 pub use config::Config;
 pub use error::{Error, Result};
 
-/// RAII handle that restores DNS configuration when closed or dropped.
+/// Handle for an applied DNS configuration; close or drop it to restore
+/// previous state.
 pub struct SetDns(Option<platform::SetDns>);
 
 impl SetDns {
