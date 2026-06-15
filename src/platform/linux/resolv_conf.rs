@@ -171,7 +171,14 @@ fn copy_with_fsync(from: &'static str, to: &'static str) -> Result<()> {
 }
 
 fn rename(from: &'static str, to: &'static str) -> Result<()> {
-    fs::rename(from, to).map_err(|source| map_io("rename", to, source))
+    match fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(source) if source.raw_os_error() == Some(libc::EBUSY) => {
+            copy_with_fsync(from, to)?;
+            fs::remove_file(from).map_err(|source| map_io("remove", from, source))
+        },
+        Err(source) => Err(map_io("rename", to, source)),
+    }
 }
 
 fn sync_dir(path: &'static str) -> Result<()> {
