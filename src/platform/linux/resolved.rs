@@ -41,6 +41,12 @@ pub(super) enum ResolvedError {
     },
 }
 
+impl From<ResolvedError> for Error {
+    fn from(error: ResolvedError) -> Self {
+        Self::Backend(Box::new(error))
+    }
+}
+
 impl Manager {
     pub(crate) fn connect() -> std::result::Result<Self, ResolvedError> {
         let connection = Connection::system().map_err(ResolvedError::SystemBus)?;
@@ -58,6 +64,7 @@ impl Manager {
             return Err(ResolvedError::NoOwner);
         }
 
+        log::debug!("connected to systemd-resolved on the system bus");
         Ok(Self { connection })
     }
 
@@ -68,6 +75,17 @@ impl Manager {
                 .as_deref()
                 .expect("device is checked by caller"),
         )?;
+        log::debug!(
+            "applying systemd-resolved DNS: ifindex={}, mode={}, servers={}, domains={}",
+            ifindex,
+            if config.domains.is_empty() {
+                "global"
+            } else {
+                "split"
+            },
+            config.servers.len(),
+            config.domains.len()
+        );
         let proxy = manager_proxy(&self.connection)?;
         let dns = dns_servers(&config.servers);
         call(&proxy, "SetLinkDNS", &(ifindex, dns))?;
@@ -87,6 +105,7 @@ impl Manager {
         }
 
         call(&proxy, "FlushCaches", &())?;
+        log::debug!("flushed systemd-resolved caches after apply");
 
         Ok(SetDns {
             connection: self.connection.clone(),
@@ -99,13 +118,17 @@ impl SetDns {
     pub(crate) fn close(self) -> Result<()> {
         let proxy = manager_proxy(&self.connection)?;
         call(&proxy, "RevertLink", &(self.ifindex))?;
+        log::debug!(
+            "reverted systemd-resolved link configuration: ifindex={}",
+            self.ifindex
+        );
         call(&proxy, "FlushCaches", &())
     }
 }
 
 fn manager_proxy(connection: &Connection) -> Result<Proxy<'_>> {
-    Proxy::new(connection, DESTINATION, PATH, MANAGER_INTERFACE)
-        .map_err(|source| backend(ResolvedError::ServiceUnavailable(source)))
+    Ok(Proxy::new(connection, DESTINATION, PATH, MANAGER_INTERFACE)
+        .map_err(ResolvedError::ServiceUnavailable)?)
 }
 
 fn call<B>(proxy: &Proxy<'_>, method: &'static str, body: &B) -> Result<()>
@@ -114,18 +137,19 @@ where
 {
     proxy
         .call::<_, _, ()>(method, body)
-        .map_err(|source| backend(ResolvedError::Method { method, source }))
+        .map_err(|source| ResolvedError::Method { method, source })?;
+    Ok(())
 }
 
 fn interface_index(interface: &str) -> Result<i32> {
-    let name = CString::new(interface)
-        .map_err(|source| backend(ResolvedError::InvalidInterfaceName(source)))?;
+    let name = CString::new(interface).map_err(ResolvedError::InvalidInterfaceName)?;
     let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
     if index == 0 {
-        return Err(backend(ResolvedError::InterfaceIndex {
+        return Err(ResolvedError::InterfaceIndex {
             interface: interface.to_owned(),
             source: std::io::Error::last_os_error(),
-        }));
+        }
+        .into());
     }
     Ok(index as i32)
 }
@@ -145,8 +169,4 @@ fn resolved_domain(domain: &str) -> String {
     resolved.push_str(domain);
     resolved.push('.');
     resolved
-}
-
-fn backend(error: ResolvedError) -> Error {
-    Error::Backend(Box::new(error))
 }

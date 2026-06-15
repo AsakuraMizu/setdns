@@ -12,8 +12,10 @@ pub(crate) enum SetDns {
 impl SetDns {
     pub(crate) fn apply(config: NormalizedConfig) -> Result<Self> {
         if config.domains.is_empty() {
+            log::debug!("selected macOS SystemConfiguration backend for global DNS");
             global::SetDns::apply(config).map(Self::Global)
         } else {
+            log::debug!("selected macOS /etc/resolver backend for split DNS");
             resolver::SetDns::apply(config).map(Self::Resolver)
         }
     }

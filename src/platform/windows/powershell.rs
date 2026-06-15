@@ -1,5 +1,9 @@
 use std::process::{Command, ExitStatus};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+use crate::Error;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PowerShellError {
     #[error("failed to launch PowerShell for {operation}: {source}")]
@@ -19,6 +23,12 @@ pub(crate) enum PowerShellError {
         stdout: OutputText,
         stderr: OutputText,
     },
+}
+
+impl From<PowerShellError> for Error {
+    fn from(error: PowerShellError) -> Self {
+        Self::Backend(Box::new(error))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +53,7 @@ impl std::fmt::Display for Status {
 }
 
 pub(crate) fn run(operation: &'static str, script: &str) -> Result<Vec<u8>, PowerShellError> {
+    log::debug!("running PowerShell for {operation}");
     let encoded = encode_command(script);
     let output = Command::new("powershell.exe")
         .args([
@@ -55,10 +66,18 @@ pub(crate) fn run(operation: &'static str, script: &str) -> Result<Vec<u8>, Powe
         ])
         .output()
         .map_err(|source| PowerShellError::Launch { operation, source })?;
-
     if output.status.success() {
+        log::debug!(
+            "PowerShell completed {operation}: stdout={} bytes, stderr={} bytes",
+            output.stdout.len(),
+            output.stderr.len()
+        );
         Ok(output.stdout)
     } else {
+        log::warn!(
+            "PowerShell failed during {operation}: {}",
+            Status(output.status)
+        );
         Err(PowerShellError::Status {
             operation,
             status: Status(output.status),
@@ -73,44 +92,5 @@ fn encode_command(script: &str) -> String {
     for unit in script.encode_utf16() {
         bytes.extend_from_slice(&unit.to_le_bytes());
     }
-    base64(&bytes)
-}
-
-fn base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let first = chunk[0];
-        let second = chunk.get(1).copied().unwrap_or(0);
-        let third = chunk.get(2).copied().unwrap_or(0);
-
-        encoded.push(TABLE[(first >> 2) as usize] as char);
-        encoded.push(TABLE[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
-        if chunk.len() > 1 {
-            encoded.push(TABLE[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char);
-        } else {
-            encoded.push('=');
-        }
-        if chunk.len() > 2 {
-            encoded.push(TABLE[(third & 0b0011_1111) as usize] as char);
-        } else {
-            encoded.push('=');
-        }
-    }
-
-    encoded
-}
-
-#[cfg(test)]
-mod tests {
-    use super::encode_command;
-
-    #[test]
-    fn encodes_powershell_command_as_utf16le_base64() {
-        assert_eq!(
-            encode_command("Write-Output 'ok'"),
-            "VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAAnAG8AawAnAA=="
-        );
-    }
+    STANDARD.encode(bytes)
 }

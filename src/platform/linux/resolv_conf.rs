@@ -19,12 +19,21 @@ pub(crate) struct SetDns {
 
 #[derive(Debug, thiserror::Error)]
 enum ResolvConfError {
+    #[error("split DNS is not supported by the /etc/resolv.conf backend")]
+    UnsupportedSplitDns,
     #[error("found stale setdns backup without matching owned /etc/resolv.conf")]
     StaleBackup,
     #[error("setdns backup is missing for owner {owner}")]
     MissingBackup { owner: String },
     #[error("/etc/resolv.conf was changed outside setdns before restore for owner {owner}")]
     Trampled { owner: String },
+    #[error("permission denied while trying to {operation} {path}")]
+    PermissionDenied {
+        operation: &'static str,
+        path: &'static str,
+        #[source]
+        source: io::Error,
+    },
     #[error("failed to {operation} {path}")]
     Io {
         operation: &'static str,
@@ -34,21 +43,34 @@ enum ResolvConfError {
     },
 }
 
+impl From<ResolvConfError> for Error {
+    fn from(error: ResolvConfError) -> Self {
+        Self::Backend(Box::new(error))
+    }
+}
+
 impl SetDns {
     pub(crate) fn apply(config: NormalizedConfig) -> Result<Self> {
         if !config.domains.is_empty() {
-            return Err(Error::UnsupportedSplitDns);
+            return Err(ResolvConfError::UnsupportedSplitDns.into());
         }
 
+        log::debug!(
+            "applying Linux /etc/resolv.conf DNS: owner={}, servers={}",
+            config.owner,
+            config.servers.len()
+        );
         cleanup_residual(&config.owner)?;
         if Path::new(BACKUP).exists() {
-            return Err(backend(ResolvConfError::StaleBackup));
+            return Err(ResolvConfError::StaleBackup.into());
         }
 
         copy_with_fsync(RESOLV_CONF, BACKUP)?;
+        log::debug!("backed up {RESOLV_CONF} to {BACKUP}");
         write_temp(&render_resolv_conf(&config.owner, &config.servers))?;
         rename(TEMP, RESOLV_CONF)?;
         sync_dir(ETC)?;
+        log::debug!("replaced {RESOLV_CONF} with setdns-managed content");
 
         Ok(Self {
             owner: config.owner,
@@ -58,14 +80,13 @@ impl SetDns {
     pub(crate) fn close(self) -> Result<()> {
         let current = read_to_string(RESOLV_CONF)?;
         if !current.starts_with(&owner_header(&self.owner)) {
-            return Err(backend(ResolvConfError::Trampled { owner: self.owner }));
+            return Err(ResolvConfError::Trampled { owner: self.owner }.into());
         }
         if !Path::new(BACKUP).exists() {
-            return Err(backend(ResolvConfError::MissingBackup {
-                owner: self.owner,
-            }));
+            return Err(ResolvConfError::MissingBackup { owner: self.owner }.into());
         }
 
+        log::debug!("restoring {RESOLV_CONF} from {BACKUP}");
         rename(BACKUP, RESOLV_CONF)?;
         sync_dir(ETC)
     }
@@ -95,11 +116,13 @@ fn cleanup_residual(owner: &str) -> Result<()> {
         return Ok(());
     }
     if !Path::new(BACKUP).exists() {
-        return Err(backend(ResolvConfError::MissingBackup {
+        return Err(ResolvConfError::MissingBackup {
             owner: owner.to_owned(),
-        }));
+        }
+        .into());
     }
 
+    log::debug!("cleaning up residual setdns {RESOLV_CONF} state for owner {owner}");
     rename(BACKUP, RESOLV_CONF)?;
     sync_dir(ETC)
 }
@@ -163,17 +186,18 @@ fn read_to_string(path: &'static str) -> Result<String> {
 }
 
 fn map_io(operation: &'static str, path: &'static str, source: io::Error) -> Error {
-    if source.kind() == io::ErrorKind::PermissionDenied {
-        Error::PermissionDenied
-    } else {
-        backend(ResolvConfError::Io {
+    match source.kind() {
+        io::ErrorKind::PermissionDenied => ResolvConfError::PermissionDenied {
             operation,
             path,
             source,
-        })
+        }
+        .into(),
+        _ => ResolvConfError::Io {
+            operation,
+            path,
+            source,
+        }
+        .into(),
     }
-}
-
-fn backend(error: ResolvConfError) -> Error {
-    Error::Backend(Box::new(error))
 }

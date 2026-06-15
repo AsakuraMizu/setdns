@@ -2,7 +2,7 @@ mod powershell;
 
 use std::{fmt::Write as _, net::IpAddr};
 
-use crate::{Error, Result, config::NormalizedConfig};
+use crate::{Result, config::NormalizedConfig};
 
 const RULE_NAME_PREFIX: &str = "__SETDNS_NRPT_NAME__";
 const NAMESPACE_CHUNK_SIZE: usize = 50;
@@ -13,25 +13,31 @@ pub(crate) struct SetDns {
 
 impl SetDns {
     pub(crate) fn apply(config: NormalizedConfig) -> Result<Self> {
-        let _ = &config.device;
+        if let Some(device) = &config.device {
+            log::warn!("ignoring Windows device field '{device}'; NRPT rules are global");
+        }
 
         let namespaces = namespaces(&config);
+        log::debug!(
+            "applying Windows NRPT DNS rules: owner={}, servers={}, namespaces={}",
+            config.owner,
+            config.servers.len(),
+            namespaces.len()
+        );
         let script = apply_script(&config.owner, &config.servers, &namespaces);
-        let stdout = powershell::run("apply NRPT rules", &script).map_err(backend_error)?;
+        let stdout = powershell::run("apply NRPT rules", &script)?;
         let rule_names = parse_rule_names(&stdout);
+        log::debug!("created {} Windows NRPT rules", rule_names.len());
 
         Ok(Self { rule_names })
     }
 
     pub(crate) fn close(self) -> Result<()> {
+        log::debug!("removing {} Windows NRPT rules", self.rule_names.len());
         let script = close_script(&self.rule_names);
-        powershell::run("remove NRPT rules", &script).map_err(backend_error)?;
+        powershell::run("remove NRPT rules", &script)?;
         Ok(())
     }
-}
-
-fn backend_error(error: powershell::PowerShellError) -> Error {
-    Error::Backend(Box::new(error))
 }
 
 fn namespaces(config: &NormalizedConfig) -> Vec<String> {
@@ -152,7 +158,9 @@ fn server_strings(servers: &[IpAddr]) -> Vec<String> {
 fn parse_rule_names(stdout: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(stdout)
         .lines()
-        .filter_map(|line| line.strip_prefix(RULE_NAME_PREFIX).map(str::to_owned))
+        .filter_map(|line| line.strip_prefix(RULE_NAME_PREFIX))
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
         .collect()
 }
 

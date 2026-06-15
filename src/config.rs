@@ -1,17 +1,31 @@
 use std::net::IpAddr;
 
+use addr::parse_dns_name;
+
 use crate::{Error, Result};
 
 /// DNS configuration applied by [`crate::SetDns`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     /// Owner identifier used to mark system DNS state written by this crate.
+    ///
+    /// Must be 1 to 64 ASCII bytes and contain only letters, digits, `.`, `_`,
+    /// and `-`.
     pub owner: String,
     /// DNS servers to use while the handle is alive.
     pub servers: Vec<IpAddr>,
-    /// Empty for global DNS, or suffixes for split DNS.
+    /// DNS suffixes for split DNS. Empty means global DNS.
+    ///
+    /// Suffixes are ASCII DNS names such as `corp.internal`. A leading `*.` is
+    /// accepted to express wildcard intent, so `*.corp.internal` normalizes to
+    /// the same suffix as `corp.internal`.
     pub domains: Vec<String>,
     /// Optional platform target, such as an interface name.
+    ///
+    /// Linux treats this as an interface name and requires it for split DNS.
+    /// macOS treats it as a BSD interface name for global DNS and ignores it
+    /// for split DNS. Windows intentionally ignores this field and applies
+    /// global NRPT rules.
     pub device: Option<String>,
 }
 
@@ -117,62 +131,32 @@ fn parse_domain_suffix(input: &str) -> Result<DomainSuffix> {
 }
 
 fn validate_domain(domain: &str) -> Result<()> {
-    if domain.is_empty() {
-        return Err(invalid_domain("domain must not be empty"));
-    }
-
-    if domain == "." {
-        return Err(invalid_domain("root domain is not supported"));
+    if domain.is_empty()
+        || domain == "."
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+        || domain.contains("..")
+    {
+        return Err(Error::InvalidConfig(
+            "domain must contain non-empty labels separated by '.'".to_owned(),
+        ));
     }
 
     if !domain.is_ascii() {
-        return Err(invalid_domain("domain must be ASCII"));
+        return Err(Error::InvalidConfig("domain must be ASCII".to_owned()));
     }
 
-    if domain.starts_with('.') || domain.ends_with('.') {
-        return Err(invalid_domain("domain must not start or end with '.'"));
-    }
-
-    if domain.len() > 253 {
-        return Err(invalid_domain("domain must be at most 253 bytes"));
-    }
-
-    for label in domain.split('.') {
-        validate_label(label)?;
-    }
-
-    Ok(())
-}
-
-fn validate_label(label: &str) -> Result<()> {
-    if label.is_empty() {
-        return Err(invalid_domain("domain labels must not be empty"));
-    }
-
-    if label.len() > 63 {
-        return Err(invalid_domain("domain labels must be at most 63 bytes"));
-    }
-
-    if label.starts_with('-') || label.ends_with('-') {
-        return Err(invalid_domain(
-            "domain labels must not start or end with '-'",
+    if domain.contains('*') {
+        return Err(Error::InvalidConfig(
+            "wildcard domains must use the '*.' prefix".to_owned(),
         ));
     }
 
-    if !label
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
-        return Err(invalid_domain(
-            "domain labels may only contain ASCII letters, digits, and '-'",
-        ));
-    }
+    parse_dns_name(domain).map_err(|source| {
+        Error::InvalidConfig(format!("invalid domain suffix '{domain}': {source}"))
+    })?;
 
     Ok(())
-}
-
-fn invalid_domain(message: &'static str) -> Error {
-    Error::InvalidConfig(message.to_owned())
 }
 
 fn label_count(domain: &str) -> usize {
@@ -221,6 +205,17 @@ mod tests {
     }
 
     #[test]
+    fn domain_accepts_dns_service_labels() {
+        assert_eq!(
+            parse_domain_suffix("_tcp.Corp.Internal").unwrap(),
+            DomainSuffix {
+                domain: "_tcp.corp.internal".to_owned(),
+                wildcard: false,
+            }
+        );
+    }
+
+    #[test]
     fn domain_rejects_invalid_inputs() {
         for domain in [
             "",
@@ -230,9 +225,6 @@ mod tests {
             "corp.internal.",
             "*.",
             "corp..internal",
-            "corp_internal",
-            "-corp.internal",
-            "corp-.internal",
             "café.example",
         ] {
             assert!(parse_domain_suffix(domain).is_err(), "{domain}");

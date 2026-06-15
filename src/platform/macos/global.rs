@@ -57,11 +57,23 @@ enum GlobalError {
     ApplyFailed,
 }
 
+impl From<GlobalError> for Error {
+    fn from(error: GlobalError) -> Self {
+        Self::Backend(Box::new(error))
+    }
+}
+
 impl SetDns {
     pub(crate) fn apply(config: NormalizedConfig) -> Result<Self> {
         let prefs = preferences();
         let service = target_service(&prefs, config.device.as_deref())?;
         let service_id = service_id(&service)?;
+        log::debug!(
+            "applying macOS global DNS: service_id={}, servers={}, device={}",
+            service_id,
+            config.servers.len(),
+            config.device.as_deref().unwrap_or("primary")
+        );
         let protocol = dns_protocol(&service, &service_id)?;
         let original_dns = protocol_configuration(&protocol);
         let next_dns = dns_with_servers(original_dns.as_ref(), &config.servers);
@@ -73,6 +85,7 @@ impl SetDns {
 
         refresh_interface(&service);
         crate::platform::macos::state::flush_dns_cache();
+        log::debug!("applied macOS global DNS to service {service_id}");
 
         Ok(Self {
             service_id,
@@ -84,6 +97,7 @@ impl SetDns {
         let prefs = preferences();
         let service = service_by_id(&prefs, &self.service_id)?;
         let protocol = dns_protocol(&service, &self.service_id)?;
+        log::debug!("restoring macOS global DNS for service {}", self.service_id);
 
         with_preferences_lock(&prefs, || {
             set_protocol_configuration(&protocol, self.original_dns.as_ref(), &self.service_id)?;
@@ -134,14 +148,14 @@ fn service_by_interface(prefs: &SCPreferences, ifname: &str) -> Result<SCNetwork
         }
     }
 
-    Err(backend(GlobalError::ServiceNotFound(ifname.to_owned())))
+    Err(GlobalError::ServiceNotFound(ifname.to_owned()).into())
 }
 
 fn service_by_id(prefs: &SCPreferences, service_id: &str) -> Result<SCNetworkService> {
     let cf_id = CFString::new(service_id);
     let service = unsafe { SCNetworkServiceCopy(prefs.to_void(), cf_id.as_concrete_TypeRef()) };
     if service.is_null() {
-        Err(backend(GlobalError::ServiceNotFound(service_id.to_owned())))
+        Err(GlobalError::ServiceNotFound(service_id.to_owned()).into())
     } else {
         Ok(unsafe { SCNetworkService::wrap_under_create_rule(service) })
     }
@@ -152,7 +166,7 @@ fn current_set(prefs: &SCPreferences) -> Result<SCNetworkSet> {
         system_configuration_sys::network_configuration::SCNetworkSetCopyCurrent(prefs.to_void())
     };
     if set.is_null() {
-        Err(backend(GlobalError::NoCurrentSet))
+        Err(GlobalError::NoCurrentSet.into())
     } else {
         Ok(unsafe { SCNetworkSet::wrap_under_create_rule(set) })
     }
@@ -160,13 +174,13 @@ fn current_set(prefs: &SCPreferences) -> Result<SCNetworkSet> {
 
 fn primary_service_id() -> Result<String> {
     let Some(store) = SCDynamicStoreBuilder::new(CFString::new(STORE_NAME)).build() else {
-        return Err(backend(GlobalError::NoPrimaryService));
+        return Err(GlobalError::NoPrimaryService.into());
     };
     let Some(value) = store.get(PRIMARY_IPV4_KEY) else {
-        return Err(backend(GlobalError::NoPrimaryService));
+        return Err(GlobalError::NoPrimaryService.into());
     };
     if !value.instance_of::<CFDictionary>() {
-        return Err(backend(GlobalError::NoPrimaryService));
+        return Err(GlobalError::NoPrimaryService.into());
     }
     let dictionary = unsafe {
         CFDictionary::<CFString, CFType>::wrap_under_get_rule(
@@ -178,7 +192,7 @@ fn primary_service_id() -> Result<String> {
         .find(&key)
         .and_then(|service| service.downcast::<CFString>())
         .map(|service| service.to_string())
-        .ok_or_else(|| backend(GlobalError::NoPrimaryService))
+        .ok_or_else(|| GlobalError::NoPrimaryService.into())
 }
 
 struct DnsProtocol {
@@ -201,7 +215,7 @@ fn dns_protocol(service: &SCNetworkService, service_id: &str) -> Result<DnsProto
     let protocol =
         unsafe { SCNetworkServiceCopyProtocol(service.as_concrete_TypeRef(), kSCEntNetDNS) };
     if protocol.is_null() {
-        Err(backend(GlobalError::NoDnsProtocol(service_id.to_owned())))
+        Err(GlobalError::NoDnsProtocol(service_id.to_owned()).into())
     } else {
         Ok(DnsProtocol { raw: protocol })
     }
@@ -244,9 +258,7 @@ fn set_protocol_configuration(
 ) -> Result<()> {
     let config = configuration.map_or(ptr::null(), |dns| dns.as_concrete_TypeRef());
     if unsafe { SCNetworkProtocolSetConfiguration(protocol.as_ptr(), config) } == 0 {
-        Err(backend(GlobalError::SetConfigurationFailed(
-            service_id.to_owned(),
-        )))
+        Err(GlobalError::SetConfigurationFailed(service_id.to_owned()).into())
     } else {
         Ok(())
     }
@@ -257,12 +269,12 @@ where
     F: FnOnce() -> Result<()>,
 {
     if unsafe { SCPreferencesLock(prefs.to_void(), true as Boolean) } == 0 {
-        return Err(backend(GlobalError::LockFailed));
+        return Err(GlobalError::LockFailed.into());
     }
 
     let result = f();
     let unlock_result = if unsafe { SCPreferencesUnlock(prefs.to_void()) } == 0 {
-        Err(backend(GlobalError::UnlockFailed))
+        Err(GlobalError::UnlockFailed.into())
     } else {
         Ok(())
     };
@@ -272,7 +284,7 @@ where
 
 fn apply_changes(prefs: &SCPreferences) -> Result<()> {
     if unsafe { SCPreferencesApplyChanges(prefs.to_void()) } == 0 {
-        Err(backend(GlobalError::ApplyFailed))
+        Err(GlobalError::ApplyFailed.into())
     } else {
         Ok(())
     }
@@ -280,8 +292,11 @@ fn apply_changes(prefs: &SCPreferences) -> Result<()> {
 
 fn refresh_interface(service: &SCNetworkService) {
     if let Some(interface) = service.network_interface() {
-        let _ =
-            unsafe { SCNetworkInterfaceForceConfigurationRefresh(interface.as_concrete_TypeRef()) };
+        if unsafe { SCNetworkInterfaceForceConfigurationRefresh(interface.as_concrete_TypeRef()) }
+            == 0
+        {
+            log::warn!("failed to refresh macOS network interface after DNS change");
+        }
     }
 }
 
@@ -290,13 +305,9 @@ fn service_enabled(service: &SCNetworkService) -> bool {
 }
 
 fn service_id(service: &SCNetworkService) -> Result<String> {
-    service_id_ref(service).ok_or_else(|| backend(GlobalError::NoPrimaryService))
+    service_id_ref(service).ok_or_else(|| GlobalError::NoPrimaryService.into())
 }
 
 fn service_id_ref(service: &SCNetworkService) -> Option<String> {
     service.id().map(|id| id.to_string())
-}
-
-fn backend(error: GlobalError) -> Error {
-    Error::Backend(Box::new(error))
 }

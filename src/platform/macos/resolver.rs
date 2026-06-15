@@ -18,6 +18,15 @@ pub(crate) struct SetDns {
 
 #[derive(Debug, thiserror::Error)]
 enum ResolverError {
+    #[error("macOS split DNS supports at most {max} nameservers, got {count}")]
+    TooManyNameservers { count: usize, max: usize },
+    #[error("permission denied while trying to {operation} {path}")]
+    PermissionDenied {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("failed to {operation} {path}: {source}")]
     Io {
         operation: &'static str,
@@ -29,13 +38,27 @@ enum ResolverError {
     NotOwned { path: PathBuf, owner: String },
 }
 
+impl From<ResolverError> for Error {
+    fn from(error: ResolverError) -> Self {
+        Self::Backend(Box::new(error))
+    }
+}
+
 impl SetDns {
     pub(crate) fn apply(config: NormalizedConfig) -> Result<Self> {
         if config.servers.len() > MAXNS {
-            return Err(Error::InvalidConfig(format!(
-                "macOS split DNS supports at most {MAXNS} nameservers"
-            )));
+            return Err(ResolverError::TooManyNameservers {
+                count: config.servers.len(),
+                max: MAXNS,
+            }
+            .into());
         }
+        log::debug!(
+            "applying macOS split DNS resolver files: owner={}, domains={}, servers={}",
+            config.owner,
+            config.domains.len(),
+            config.servers.len()
+        );
 
         cleanup_owner(&config.owner)?;
         fs::create_dir_all(RESOLVER_DIR)
@@ -46,6 +69,7 @@ impl SetDns {
             let content = render_resolver(&config.owner, &suffix.domain, &config.servers);
             write_resolver(&config.owner, &suffix.domain, &content)?;
             domains.push(suffix.domain.clone());
+            log::debug!("wrote macOS resolver file for domain {}", suffix.domain);
         }
 
         crate::platform::macos::state::flush_dns_cache();
@@ -57,6 +81,11 @@ impl SetDns {
     }
 
     pub(crate) fn close(self) -> Result<()> {
+        log::debug!(
+            "removing macOS split DNS resolver files: owner={}, domains={}",
+            self.owner,
+            self.domains.len()
+        );
         let mut first_error = None;
         for domain in &self.domains {
             if let Err(err) = remove_owned_file(&resolver_path(domain), &self.owner) {
@@ -111,6 +140,7 @@ fn remove_if_owner_marked(path: &Path, owner: &str) -> Result<()> {
     };
 
     if has_owner_header(&content, owner) {
+        log::debug!("removing residual macOS resolver file {}", path.display());
         fs::remove_file(path).map_err(|source| map_io("remove", path.to_path_buf(), source))?;
     }
 
@@ -125,10 +155,11 @@ fn remove_owned_file(path: &Path, owner: &str) -> Result<()> {
     };
 
     if !has_owner_header(&content, owner) {
-        return Err(backend(ResolverError::NotOwned {
+        return Err(ResolverError::NotOwned {
             path: path.to_path_buf(),
             owner: owner.to_owned(),
-        }));
+        }
+        .into());
     }
 
     fs::remove_file(path).map_err(|source| map_io("remove", path.to_path_buf(), source))
@@ -162,10 +193,11 @@ fn ensure_absent_or_owned(path: &Path, owner: &str) -> Result<()> {
     if has_owner_header(&content, owner) {
         Ok(())
     } else {
-        Err(backend(ResolverError::NotOwned {
+        Err(ResolverError::NotOwned {
             path: path.to_path_buf(),
             owner: owner.to_owned(),
-        }))
+        }
+        .into())
     }
 }
 
@@ -202,15 +234,17 @@ fn resolver_path(domain: &str) -> PathBuf {
 
 fn map_io(operation: &'static str, path: PathBuf, source: io::Error) -> Error {
     match source.kind() {
-        io::ErrorKind::PermissionDenied => Error::PermissionDenied,
-        _ => backend(ResolverError::Io {
+        io::ErrorKind::PermissionDenied => ResolverError::PermissionDenied {
             operation,
             path,
             source,
-        }),
+        }
+        .into(),
+        _ => ResolverError::Io {
+            operation,
+            path,
+            source,
+        }
+        .into(),
     }
-}
-
-fn backend(error: ResolverError) -> Error {
-    Error::Backend(Box::new(error))
 }
