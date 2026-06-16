@@ -21,7 +21,10 @@ use system_configuration_sys::{
         SCNetworkProtocolRef, SCNetworkProtocolSetConfiguration, SCNetworkServiceCopy,
         SCNetworkServiceCopyProtocol, SCNetworkServiceGetEnabled,
     },
-    preferences::{SCPreferencesApplyChanges, SCPreferencesLock, SCPreferencesUnlock},
+    preferences::{
+        SCPreferencesApplyChanges, SCPreferencesCommitChanges, SCPreferencesLock,
+        SCPreferencesUnlock,
+    },
     schema_definitions::{
         kSCDynamicStorePropNetPrimaryService, kSCEntNetDNS, kSCPropNetDNSServerAddresses,
     },
@@ -53,6 +56,8 @@ enum GlobalError {
     UnlockFailed,
     #[error("failed to set DNS protocol configuration for service {0}")]
     SetConfigurationFailed(String),
+    #[error("failed to commit SystemConfiguration changes")]
+    CommitFailed,
     #[error("failed to apply SystemConfiguration changes")]
     ApplyFailed,
 }
@@ -80,7 +85,7 @@ impl SetDns {
 
         with_preferences_lock(&prefs, || {
             set_protocol_configuration(&protocol, Some(&next_dns), &service_id)?;
-            apply_changes(&prefs)
+            commit_and_apply_changes(&prefs)
         })?;
 
         refresh_interface(&service);
@@ -101,7 +106,7 @@ impl SetDns {
 
         with_preferences_lock(&prefs, || {
             set_protocol_configuration(&protocol, self.original_dns.as_ref(), &self.service_id)?;
-            apply_changes(&prefs)
+            commit_and_apply_changes(&prefs)
         })?;
 
         refresh_interface(&service);
@@ -282,7 +287,10 @@ where
     result.and(unlock_result)
 }
 
-fn apply_changes(prefs: &SCPreferences) -> Result<()> {
+fn commit_and_apply_changes(prefs: &SCPreferences) -> Result<()> {
+    if unsafe { SCPreferencesCommitChanges(prefs.to_void()) } == 0 {
+        return Err(GlobalError::CommitFailed.into());
+    }
     if unsafe { SCPreferencesApplyChanges(prefs.to_void()) } == 0 {
         Err(GlobalError::ApplyFailed.into())
     } else {
