@@ -93,6 +93,17 @@ impl SetDns {
 }
 
 pub(crate) fn is_managed_by_resolved() -> bool {
+    if resolv_conf_symlink_points_to_resolved() {
+        return true;
+    }
+
+    let Ok(content) = fs::read_to_string(RESOLV_CONF) else {
+        return false;
+    };
+    resolv_conf_only_uses_resolved_stub(&content)
+}
+
+fn resolv_conf_symlink_points_to_resolved() -> bool {
     let Ok(metadata) = fs::symlink_metadata(RESOLV_CONF) else {
         return false;
     };
@@ -104,6 +115,29 @@ pub(crate) fn is_managed_by_resolved() -> bool {
         return false;
     };
     target.to_string_lossy().contains("systemd/resolve")
+}
+
+fn resolv_conf_only_uses_resolved_stub(content: &str) -> bool {
+    let mut saw_nameserver = false;
+
+    for line in content.lines() {
+        let line = line.trim_start();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let mut fields = line.split_whitespace();
+        if fields.next() != Some("nameserver") {
+            continue;
+        }
+
+        saw_nameserver = true;
+        if !matches!(fields.next(), Some("127.0.0.53" | "127.0.0.54")) {
+            return false;
+        }
+    }
+
+    saw_nameserver
 }
 
 fn cleanup_residual(owner: &str) -> Result<()> {
@@ -206,5 +240,37 @@ fn map_io(operation: &'static str, path: &'static str, source: io::Error) -> Err
             source,
         }
         .into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolv_conf_only_uses_resolved_stub;
+
+    #[test]
+    fn detects_resolved_stub_nameservers() {
+        assert!(resolv_conf_only_uses_resolved_stub(
+            "nameserver 127.0.0.53\noptions edns0 trust-ad\n"
+        ));
+        assert!(resolv_conf_only_uses_resolved_stub(
+            "nameserver 127.0.0.54\nnameserver 127.0.0.53\n"
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_or_mixed_nameservers() {
+        assert!(!resolv_conf_only_uses_resolved_stub("options edns0\n"));
+        assert!(!resolv_conf_only_uses_resolved_stub("nameserver 1.1.1.1\n"));
+        assert!(!resolv_conf_only_uses_resolved_stub(
+            "nameserver 127.0.0.53\nnameserver 1.1.1.1\n"
+        ));
+    }
+
+    #[test]
+    fn ignores_comments_before_stub_nameservers() {
+        assert!(resolv_conf_only_uses_resolved_stub(
+            "# nameserver 1.1.1.1\n# 127.0.0.53 is the systemd-resolved stub \
+             resolver.\nnameserver 127.0.0.53\n"
+        ));
     }
 }
