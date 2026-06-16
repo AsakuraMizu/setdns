@@ -24,24 +24,22 @@ pub fn expect_resolves(name: &str) -> Result<Vec<IpAddr>> {
 
 pub fn expect_overlay(name: &str) -> Result<()> {
     let ips = expect_resolves(name)?;
-    if !contains_overlay(&ips) {
-        bail!("{name} did not resolve to an overlay address; got {ips:?}");
+    if !ips.iter().all(is_overlay_ip) {
+        bail!("{name} did not resolve exclusively to overlay addresses; got {ips:?}");
     }
     Ok(())
 }
 
 pub fn expect_not_overlay(name: &str) -> Result<()> {
     match resolve_system_ips(name) {
-        Ok(ips) if contains_overlay(&ips) => Err(anyhow!(
+        Ok(ips) if ips.iter().any(is_overlay_ip) => Err(anyhow!(
             "{name} still resolves to an overlay address after restore: {ips:?}"
         )),
         Ok(_) | Err(_) => Ok(()),
     }
 }
 
-fn contains_overlay(ips: &[IpAddr]) -> bool {
-    ips.iter().any(|ip| {
-        matches!(ip, IpAddr::V4(ip) if *ip == OVERLAY_IPV4)
-            || matches!(ip, IpAddr::V6(ip) if *ip == OVERLAY_IPV6)
-    })
+fn is_overlay_ip(ip: &IpAddr) -> bool {
+    matches!(ip, IpAddr::V4(ip) if *ip == OVERLAY_IPV4)
+        || matches!(ip, IpAddr::V6(ip) if *ip == OVERLAY_IPV6)
 }

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{Arc, Mutex},
 };
@@ -18,7 +18,7 @@ use tokio::{
     time::{Duration, timeout},
 };
 
-use crate::scenario::{LOCAL_ONLY_NAME, OVERLAY_IPV4, OVERLAY_IPV6, PUBLIC_OVERLAY_NAME};
+use crate::scenario::{OVERLAY_IPV4, OVERLAY_IPV6};
 
 const DNS_PORT: u16 = 53;
 pub const DEFAULT_TEST_DNS_LISTEN_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
@@ -43,14 +43,18 @@ pub struct TestDnsServer {
 }
 
 impl TestDnsServer {
-    pub async fn start(listen_ip: IpAddr, parent_dns: Vec<IpAddr>) -> Result<Self> {
+    pub async fn start(
+        listen_ip: IpAddr,
+        parent_dns: Vec<IpAddr>,
+        overlay_names: HashSet<String>,
+    ) -> Result<Self> {
         let socket = UdpSocket::bind(SocketAddr::new(listen_ip, DNS_PORT))
             .await
             .with_context(|| format!("failed to bind test DNS server to {listen_ip}:{DNS_PORT}"))?;
         let counters = Arc::new(Mutex::new(Counters::default()));
         let task_counters = Arc::clone(&counters);
         let task = tokio::spawn(async move {
-            run_dns_loop(socket, parent_dns, task_counters).await;
+            run_dns_loop(socket, parent_dns, overlay_names, task_counters).await;
         });
 
         Ok(Self {
@@ -78,7 +82,12 @@ impl Drop for TestDnsServer {
     }
 }
 
-async fn run_dns_loop(socket: UdpSocket, parent_dns: Vec<IpAddr>, counters: Arc<Mutex<Counters>>) {
+async fn run_dns_loop(
+    socket: UdpSocket,
+    parent_dns: Vec<IpAddr>,
+    overlay_names: HashSet<String>,
+    counters: Arc<Mutex<Counters>>,
+) {
     let mut buf = [0_u8; MAX_DNS_PACKET];
     loop {
         let (len, peer) = match socket.recv_from(&mut buf).await {
@@ -89,7 +98,7 @@ async fn run_dns_loop(socket: UdpSocket, parent_dns: Vec<IpAddr>, counters: Arc<
             },
         };
         let packet = &buf[..len];
-        let response = match handle_query(packet, &parent_dns, &counters).await {
+        let response = match handle_query(packet, &parent_dns, &overlay_names, &counters).await {
             Ok(response) => response,
             Err(error) => {
                 tracing::warn!("failed to handle DNS query: {error:#}");
@@ -105,6 +114,7 @@ async fn run_dns_loop(socket: UdpSocket, parent_dns: Vec<IpAddr>, counters: Arc<
 async fn handle_query(
     packet: &[u8],
     parent_dns: &[IpAddr],
+    overlay_names: &HashSet<String>,
     counters: &Arc<Mutex<Counters>>,
 ) -> Result<Vec<u8>> {
     let request = Message::from_vec(packet).context("failed to decode DNS query")?;
@@ -116,7 +126,7 @@ async fn handle_query(
     let record_type = query.query_type();
     increment_query_counters(counters, &name, record_type);
 
-    if is_overlay_name(&name) {
+    if overlay_names.contains(&name) {
         let mut response = Message::new(
             request.metadata.id,
             MessageType::Response,
@@ -208,8 +218,4 @@ fn increment_forwarded_counter(counters: &Arc<Mutex<Counters>>, name: &str) {
 
 fn normalize_name(name: &Name) -> String {
     name.to_ascii().trim_end_matches('.').to_ascii_lowercase()
-}
-
-fn is_overlay_name(name: &str) -> bool {
-    name == PUBLIC_OVERLAY_NAME || name == LOCAL_ONLY_NAME
 }
