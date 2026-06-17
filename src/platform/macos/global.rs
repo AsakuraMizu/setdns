@@ -121,11 +121,33 @@ fn preferences() -> SCPreferences {
 
 fn target_service(prefs: &SCPreferences, device: Option<&str>) -> Result<SCNetworkService> {
     if let Some(ifname) = device {
-        return service_by_interface(prefs, ifname);
+        match service_by_interface(prefs, ifname) {
+            Ok(service) => return Ok(service),
+            Err(error) if is_dynamic_tunnel_interface(ifname) && is_service_not_found(&error) => {
+                log::debug!(
+                    "macOS network service for dynamic interface {ifname} was not found; \
+                     falling back to the primary network service"
+                );
+            },
+            Err(error) => return Err(error),
+        }
     }
 
     let service_id = primary_service_id()?;
     service_by_id(prefs, &service_id)
+}
+
+fn is_dynamic_tunnel_interface(ifname: &str) -> bool {
+    ifname.starts_with("utun")
+}
+
+fn is_service_not_found(error: &Error) -> bool {
+    match error {
+        Error::Backend(source) => source
+            .downcast_ref::<GlobalError>()
+            .is_some_and(|error| matches!(error, GlobalError::ServiceNotFound(_))),
+        Error::InvalidConfig(_) => false,
+    }
 }
 
 fn service_by_interface(prefs: &SCPreferences, ifname: &str) -> Result<SCNetworkService> {

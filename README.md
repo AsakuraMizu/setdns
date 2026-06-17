@@ -33,5 +33,5 @@ fn main() -> setdns::Result<()> {
 ## Platform notes
 
 - Linux split DNS 需要 systemd-resolved 和 `device`；全局 DNS 可使用 `/etc/resolv.conf` 或 systemd-resolved。
-- macOS 全局 DNS 使用 SystemConfiguration，split DNS 使用 `/etc/resolver`；split DNS 忽略 `device`。
+- macOS 全局 DNS 使用 SystemConfiguration。`device` 会按 BSD 接口名定位 network service；动态 `utun*` 接口找不到 service 时回退到 primary service。split DNS 使用 `/etc/resolver` 并忽略 `device`。
 - Windows 使用 PowerShell 配置 NRPT 规则，并忽略 `device`。
