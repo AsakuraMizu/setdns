@@ -20,13 +20,6 @@ pub(crate) struct SetDns {
 enum ResolverError {
     #[error("macOS split DNS supports at most {max} nameservers, got {count}")]
     TooManyNameservers { count: usize, max: usize },
-    #[error("permission denied while trying to {operation} {path}")]
-    PermissionDenied {
-        operation: &'static str,
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
     #[error("failed to {operation} {path}: {source}")]
     Io {
         operation: &'static str,
@@ -233,18 +226,10 @@ fn resolver_path(domain: &str) -> PathBuf {
 }
 
 fn map_io(operation: &'static str, path: PathBuf, source: io::Error) -> Error {
-    match source.kind() {
-        io::ErrorKind::PermissionDenied => ResolverError::PermissionDenied {
-            operation,
-            path,
-            source,
-        }
-        .into(),
-        _ => ResolverError::Io {
-            operation,
-            path,
-            source,
-        }
-        .into(),
+    ResolverError::Io {
+        operation,
+        path,
+        source,
     }
+    .into()
 }

@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "Temporarily apply and restore system DNS configuration, including global and split DNS."
+repository = "https://github.com/AsakuraMizu/setdns"
+documentation = "https://docs.rs/setdns"
+readme = "README.md"
+keywords = ["dns", "resolver", "split-dns", "systemd-resolved", "nrpt"]
+categories = ["network-programming", "os"]
+exclude = ["/test-runner", "/AGENTS.md"]
 
 [dependencies]
 addr = { version = "0.15", default-features = false, features = ["std"] }

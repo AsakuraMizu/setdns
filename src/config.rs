@@ -4,7 +4,7 @@ use addr::parse_dns_name;
 
 use crate::{Error, Result};
 
-/// DNS configuration applied by [`crate::SetDns`].
+/// DNS configuration to apply with [`crate::SetDns`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     /// Owner identifier used to mark system DNS state written by this crate.
@@ -12,20 +12,20 @@ pub struct Config {
     /// Must be 1 to 64 ASCII bytes and contain only letters, digits, `.`, `_`,
     /// and `-`.
     pub owner: String,
-    /// DNS servers to use while the handle is alive.
+    /// DNS servers to use while the handle is alive. Must not be empty.
     pub servers: Vec<IpAddr>,
-    /// DNS suffixes for split DNS. Empty means global DNS.
+    /// DNS suffixes for split DNS. An empty list selects global DNS.
     ///
     /// Suffixes are ASCII DNS names such as `corp.internal`. A leading `*.` is
     /// accepted to express wildcard intent, so `*.corp.internal` normalizes to
     /// the same suffix as `corp.internal`.
     pub domains: Vec<String>,
-    /// Optional platform target, such as an interface name.
+    /// Optional platform target, usually a network interface name.
     ///
     /// Linux treats this as an interface name and requires it for split DNS.
     /// macOS treats it as a BSD interface name for global DNS and ignores it
-    /// for split DNS. Windows intentionally ignores this field and applies
-    /// global NRPT rules.
+    /// for split DNS. Windows ignores this field because NRPT rules are
+    /// global.
     pub device: Option<String>,
 }
 

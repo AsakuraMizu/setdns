@@ -125,8 +125,8 @@ fn target_service(prefs: &SCPreferences, device: Option<&str>) -> Result<SCNetwo
             Ok(service) => return Ok(service),
             Err(error) if is_dynamic_tunnel_interface(ifname) && is_service_not_found(&error) => {
                 log::debug!(
-                    "macOS network service for dynamic interface {ifname} was not found; \
-                     falling back to the primary network service"
+                    "macOS network service for dynamic interface {ifname} was not found; falling \
+                     back to the primary network service"
                 );
             },
             Err(error) => return Err(error),

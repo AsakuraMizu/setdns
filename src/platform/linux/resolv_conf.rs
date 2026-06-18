@@ -27,13 +27,6 @@ enum ResolvConfError {
     MissingBackup { owner: String },
     #[error("/etc/resolv.conf was changed outside setdns before restore for owner {owner}")]
     Trampled { owner: String },
-    #[error("permission denied while trying to {operation} {path}")]
-    PermissionDenied {
-        operation: &'static str,
-        path: &'static str,
-        #[source]
-        source: io::Error,
-    },
     #[error("failed to {operation} {path}")]
     Io {
         operation: &'static str,
@@ -227,20 +220,12 @@ fn read_to_string(path: &'static str) -> Result<String> {
 }
 
 fn map_io(operation: &'static str, path: &'static str, source: io::Error) -> Error {
-    match source.kind() {
-        io::ErrorKind::PermissionDenied => ResolvConfError::PermissionDenied {
-            operation,
-            path,
-            source,
-        }
-        .into(),
-        _ => ResolvConfError::Io {
-            operation,
-            path,
-            source,
-        }
-        .into(),
+    ResolvConfError::Io {
+        operation,
+        path,
+        source,
     }
+    .into()
 }
 
 #[cfg(test)]
