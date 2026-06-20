@@ -1,232 +1,118 @@
-mod powershell;
+mod interface;
+mod nrpt;
 
-use std::{fmt::Write as _, net::IpAddr};
+use windows::core::GUID;
 
 use crate::{Result, config::NormalizedConfig};
 
-const RULE_NAME_PREFIX: &str = "__SETDNS_NRPT_NAME__";
-const NAMESPACE_CHUNK_SIZE: usize = 50;
-
 pub(crate) struct SetDns {
-    rule_names: Vec<String>,
+    nrpt_rules: nrpt::RuleSet,
+    interface_dns: Option<interface::InterfaceDns>,
 }
 
 impl SetDns {
     pub(crate) fn apply(config: NormalizedConfig) -> Result<Self> {
-        if let Some(device) = &config.device {
-            log::warn!("ignoring Windows device field '{device}'; NRPT rules are global");
-        }
-
-        let namespaces = namespaces(&config);
+        let namespaces = nrpt::namespaces_for_global_or_split(&config.domains);
         log::debug!(
             "applying Windows NRPT DNS rules: owner={}, servers={}, namespaces={}",
             config.owner,
             config.servers.len(),
             namespaces.len()
         );
-        let script = apply_script(&config.owner, &config.servers, &namespaces);
-        let stdout = powershell::run("apply NRPT rules", &script)?;
-        let rule_names = parse_rule_names(&stdout);
-        log::debug!("created {} Windows NRPT rules", rule_names.len());
 
-        Ok(Self { rule_names })
+        let mut interface_dns = None;
+        if config.domains.is_empty() {
+            if let Some(device) = &config.device {
+                log::debug!("applying Windows interface DNS on '{device}'");
+                interface_dns = interface::InterfaceDns::apply(device, &config.servers)?;
+            }
+        } else if let Some(device) = &config.device {
+            log::debug!("ignoring Windows device field '{device}' for split DNS");
+        }
+
+        let nrpt_rules = match nrpt::RuleSet::apply(&config.owner, &config.servers, &namespaces) {
+            Ok(rules) => rules,
+            Err(error) => {
+                if let Some(interface_dns) = interface_dns
+                    && let Err(restore_error) = interface_dns.close()
+                {
+                    log::warn!(
+                        "failed to restore Windows interface DNS after NRPT apply failure: \
+                         {restore_error}"
+                    );
+                }
+                return Err(error);
+            },
+        };
+        log::debug!("created {} Windows NRPT rules", nrpt_rules.len());
+        flush_dns_cache();
+
+        Ok(Self {
+            nrpt_rules,
+            interface_dns,
+        })
     }
 
     pub(crate) fn close(self) -> Result<()> {
-        log::debug!("removing {} Windows NRPT rules", self.rule_names.len());
-        let script = close_script(&self.rule_names);
-        powershell::run("remove NRPT rules", &script)?;
-        Ok(())
-    }
-}
+        let nrpt_result = self.nrpt_rules.close();
+        let interface_result = self.interface_dns.map(interface::InterfaceDns::close);
 
-fn namespaces(config: &NormalizedConfig) -> Vec<String> {
-    if config.domains.is_empty() {
-        return vec![".".to_owned()];
-    }
-
-    config
-        .domains
-        .iter()
-        .map(|domain| format!(".{}", domain.domain))
-        .collect()
-}
-
-fn apply_script(owner: &str, servers: &[IpAddr], namespaces: &[String]) -> String {
-    let mut script = String::new();
-    write_header(&mut script, owner);
-    write_string_array(&mut script, "$NameServers", &server_strings(servers));
-    write_namespace_chunks(&mut script, namespaces);
-    script.push_str(
-        r#"
-$oldRules = @(Get-DnsClientNrptRule -ErrorAction Stop | Where-Object { $_.DisplayName -eq $Owner })
-foreach ($rule in $oldRules) {
-    if ($null -ne $rule.Name -and $rule.Name -ne '') {
-        Remove-DnsClientNrptRule -Name $rule.Name -Force -ErrorAction Stop
-    }
-}
-
-$createdNames = @()
-foreach ($chunk in $NamespaceChunks) {
-    $rules = @(Add-DnsClientNrptRule -Namespace $chunk -NameServers $NameServers -DisplayName $Owner -PassThru -ErrorAction Stop)
-    foreach ($rule in $rules) {
-        if ($null -ne $rule.Name -and $rule.Name -ne '') {
-            $createdNames += [string]$rule.Name
+        if let Some(Err(error)) = &interface_result {
+            if nrpt_result.is_err() {
+                log::warn!("failed to restore Windows interface DNS during close: {error}");
+            }
         }
+
+        flush_dns_cache();
+        nrpt_result.and(interface_result.unwrap_or(Ok(())))
     }
 }
 
-if ($createdNames.Count -ne $NamespaceChunks.Count) {
-    throw "Add-DnsClientNrptRule did not return a rule name for every namespace chunk."
-}
-
-try { Clear-DnsClientCache -ErrorAction Stop } catch { }
-foreach ($name in $createdNames) {
-    Write-Output ("__SETDNS_NRPT_NAME__" + $name)
-}
-"#,
-    );
-    script
-}
-
-fn close_script(rule_names: &[String]) -> String {
-    let mut script = String::new();
-    script.push_str("$ErrorActionPreference = 'Stop'\n");
-    write_string_array(&mut script, "$RuleNames", rule_names);
-    script.push_str(
-        r#"
-foreach ($name in $RuleNames) {
-    Remove-DnsClientNrptRule -Name $name -Force -ErrorAction Stop
-}
-
-try { Clear-DnsClientCache -ErrorAction Stop } catch { }
-"#,
-    );
-    script
-}
-
-fn write_header(script: &mut String, owner: &str) {
-    script.push_str("$ErrorActionPreference = 'Stop'\n");
-    writeln!(script, "$Owner = {}", powershell_string(owner)).expect("write to String cannot fail");
-}
-
-fn write_namespace_chunks(script: &mut String, namespaces: &[String]) {
-    script.push_str("$NamespaceChunks = @(\n");
-    for chunk in namespaces.chunks(NAMESPACE_CHUNK_SIZE) {
-        script.push_str("    , ");
-        write_array_literal(script, chunk);
-        script.push('\n');
+fn flush_dns_cache() {
+    match std::process::Command::new("ipconfig")
+        .arg("/flushdns")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => log::debug!("flushed Windows DNS client cache"),
+        Ok(status) => log::debug!("ipconfig /flushdns exited with status {status}"),
+        Err(error) => log::debug!("failed to run ipconfig /flushdns: {error}"),
     }
-    script.push_str(")\n");
 }
 
-fn write_string_array(script: &mut String, name: &str, values: &[String]) {
-    script.push_str(name);
-    script.push_str(" = ");
-    write_array_literal(script, values);
-    script.push('\n');
-}
-
-fn write_array_literal(script: &mut String, values: &[String]) {
-    script.push_str("@(");
-    for (index, value) in values.iter().enumerate() {
-        if index != 0 {
-            script.push_str(", ");
-        }
-        script.push_str(&powershell_string(value));
-    }
-    script.push(')');
-}
-
-fn powershell_string(value: &str) -> String {
-    let mut quoted = String::with_capacity(value.len() + 2);
-    quoted.push('\'');
-    for character in value.chars() {
-        if character == '\'' {
-            quoted.push('\'');
-        }
-        quoted.push(character);
-    }
-    quoted.push('\'');
-    quoted
-}
-
-fn server_strings(servers: &[IpAddr]) -> Vec<String> {
-    servers.iter().map(|server| server.to_string()).collect()
-}
-
-fn parse_rule_names(stdout: &[u8]) -> Vec<String> {
-    String::from_utf8_lossy(stdout)
-        .lines()
-        .filter_map(|line| line.strip_prefix(RULE_NAME_PREFIX))
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .collect()
+fn braced_guid(guid: &GUID) -> String {
+    format!(
+        "{{{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}",
+        guid.data1,
+        guid.data2,
+        guid.data3,
+        guid.data4[0],
+        guid.data4[1],
+        guid.data4[2],
+        guid.data4[3],
+        guid.data4[4],
+        guid.data4[5],
+        guid.data4[6],
+        guid.data4[7]
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use windows::core::GUID;
 
-    use super::{NAMESPACE_CHUNK_SIZE, apply_script, close_script, namespaces, parse_rule_names};
-    use crate::config::{DomainSuffix, NormalizedConfig};
-
-    #[test]
-    fn maps_global_namespace_to_dot() {
-        let config = config(Vec::new());
-
-        assert_eq!(namespaces(&config), vec!["."]);
-    }
+    use super::braced_guid;
 
     #[test]
-    fn maps_split_namespaces_to_dot_prefixed_suffixes() {
-        let config = config(vec![
-            DomainSuffix {
-                domain: "corp.internal".to_owned(),
-                wildcard: false,
-            },
-            DomainSuffix {
-                domain: "example.net".to_owned(),
-                wildcard: true,
-            },
-        ]);
+    fn formats_registry_guid_with_braces() {
+        let guid = GUID {
+            data1: 0x12345678,
+            data2: 0x9abc,
+            data3: 0xdef0,
+            data4: [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0],
+        };
 
-        assert_eq!(namespaces(&config), vec![".corp.internal", ".example.net"]);
-    }
-
-    #[test]
-    fn chunks_split_namespaces_by_fifty() {
-        let namespaces: Vec<String> = (0..=NAMESPACE_CHUNK_SIZE)
-            .map(|index| format!(".{index}.example"))
-            .collect();
-        let script = apply_script("owner", &[IpAddr::V4(Ipv4Addr::LOCALHOST)], &namespaces);
-
-        assert!(script.contains("$NamespaceChunks = @(\n    , @('.0.example'"));
-        assert!(script.contains("\n    , @('.50.example')\n)"));
-    }
-
-    #[test]
-    fn close_script_removes_only_recorded_rule_names() {
-        let script = close_script(&["rule-one".to_owned(), "rule-two".to_owned()]);
-
-        assert!(script.contains("$RuleNames = @('rule-one', 'rule-two')"));
-        assert!(script.contains("Remove-DnsClientNrptRule -Name $name -Force"));
-        assert!(!script.contains("Get-DnsClientNrptRule"));
-    }
-
-    #[test]
-    fn parses_only_tagged_rule_names() {
-        let stdout = b"ignored\n__SETDNS_NRPT_NAME__rule-one\n__SETDNS_NRPT_NAME__rule-two\n";
-
-        assert_eq!(parse_rule_names(stdout), vec!["rule-one", "rule-two"]);
-    }
-
-    fn config(domains: Vec<DomainSuffix>) -> NormalizedConfig {
-        NormalizedConfig {
-            owner: "owner".to_owned(),
-            servers: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
-            domains,
-            device: None,
-        }
+        assert_eq!(braced_guid(&guid), "{12345678-9abc-def0-1234-56789abcdef0}");
     }
 }

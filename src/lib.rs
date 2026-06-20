@@ -21,8 +21,8 @@ impl SetDns {
     ///
     /// Returns [`Error::InvalidConfig`] before touching the platform backend if
     /// the configuration is malformed. Platform, permission, D-Bus,
-    /// SystemConfiguration, PowerShell, and I/O failures are returned as
-    /// [`Error::Backend`].
+    /// SystemConfiguration, Windows API, registry, and I/O failures are
+    /// returned as [`Error::Backend`].
     pub fn apply(config: Config) -> Result<Self> {
         let config = config.normalize()?;
         log::debug!(

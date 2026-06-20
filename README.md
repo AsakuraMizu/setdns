@@ -51,7 +51,7 @@ fn main() -> setdns::Result<()> {
 
 `forget` 的代价：丢失 `close` 能返回的恢复错误，原始状态也不再保留在内存中。下次进程启动后，唯有用相同 `owner` 再次调用 `SetDns::apply`，后端才有机会清理旧状态。
 
-以下后端按 `owner` 清理旧状态：Linux `/etc/resolv.conf`、macOS `/etc/resolver` split DNS、Windows NRPT。systemd-resolved link DNS 和 macOS 全局 DNS 不保存跨进程可恢复的原始状态——对它们来说，`forget` 就是把系统 DNS 改成新值，何时改回由调用方决定。
+以下后端按 `owner` 清理旧状态：Linux `/etc/resolv.conf`、macOS `/etc/resolver` split DNS、Windows NRPT。systemd-resolved link DNS、macOS 全局 DNS 和 Windows 全局 DNS 的接口设置不保存跨进程可恢复的原始状态——对它们来说，`forget` 就是把系统 DNS 改成新值，何时改回由调用方决定。
 
 ## 配置
 
@@ -103,7 +103,7 @@ split DNS 在 `/etc/resolver` 下为每个后缀写 resolver 文件，忽略 `de
 
 ### Windows
 
-全局 DNS 和 split DNS 都通过 PowerShell 写 DNS Client NRPT 规则。全局 DNS 用 `.` namespace，split DNS 用按后缀匹配的 namespace。Windows 忽略 `device`（NRPT 规则是全局的）。
+全局 DNS 通过 DNS Client NRPT 规则接管解析；传入 `device` 时，Windows 还会通过 `SetInterfaceDnsSettings` 设置该接口的 DNS 服务器。split DNS 只写按后缀匹配的 NRPT 规则，忽略 `device`。
 
 ### 其他平台
 
@@ -111,7 +111,7 @@ split DNS 在 `/etc/resolver` 下为每个后缀写 resolver 文件，忽略 `de
 
 ## 权限与错误处理
 
-修改系统 DNS 通常需要管理员权限：Linux 写 `/etc/resolv.conf` 或访问 systemd-resolved 系统 D-Bus，macOS 改 SystemConfiguration 或 `/etc/resolver`，Windows 执行 DNS Client NRPT PowerShell 命令。
+修改系统 DNS 通常需要管理员权限：Linux 写 `/etc/resolv.conf` 或访问 systemd-resolved 系统 D-Bus，macOS 改 SystemConfiguration 或 `/etc/resolver`，Windows 写 DNS Client NRPT 注册表规则，且在全局 DNS + `device` 模式下修改接口 DNS 设置。
 
 错误分两类：`Error::InvalidConfig`——配置在进入平台代码前被拒绝；`Error::Backend`——包装系统 API、权限、I/O 或平台不支持错误。
 

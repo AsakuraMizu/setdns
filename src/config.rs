@@ -24,8 +24,8 @@ pub struct Config {
     ///
     /// Linux treats this as an interface name and requires it for split DNS.
     /// macOS treats it as a BSD interface name for global DNS and ignores it
-    /// for split DNS. Windows ignores this field because NRPT rules are
-    /// global.
+    /// for split DNS. Windows uses it for global interface DNS and ignores it
+    /// for split DNS.
     pub device: Option<String>,
 }
 
